@@ -1,6 +1,6 @@
 CC = gcc
 CFLAGS = -W -Wall -O2 -g -fPIC -shared -Iinclude 
-EXECFLAGS = -W -Wall -O2 -g -Iinclude 
+EXECFLAGS = -W -Wall -O2 -g -Iinclude -lz
 LDFLAGS = {LDFLAGS}
 PREFIX = {PREFIX}
 LIBPATH = {LIBPATH}
@@ -11,7 +11,7 @@ SERVER_OBJS = server.o utils.o
 all:	libremotethread.so remotethread-server test alloc-test
 
 libremotethread.so:	$(LIB_OBJS)
-	$(CC) $(CFLAGS) -Wl,-soname,libremotethread.so -o $@ $(LIB_OBJS)
+	$(CC) $(CFLAGS) -Wl,-soname,libremotethread.so -o $@ $(LIB_OBJS) -lz
 
 remotethread-server:	$(SERVER_OBJS)
 	$(CC) $(EXECFLAGS) -o $@ $(SERVER_OBJS)

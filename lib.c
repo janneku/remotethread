@@ -4,6 +4,7 @@
 #include "utils.h"
 #include "proto.h"
 #include "remotethread.h"
+#include <dlfcn.h>
 #include <stdlib.h>
 #include <errno.h>
 #include <sys/socket.h>
@@ -13,6 +14,7 @@
 #include <malloc.h>
 #include <sys/mman.h>
 #include <assert.h>
+#include <zlib.h>
 
 #define MAX_SERVERS	16
 
@@ -284,6 +286,29 @@ void *remotethread_realloc(void *ptr, size_t new_size, const void *caller)
 	return chunk + 1;
 }
 
+struct zlib_chunk {
+	size_t size;
+};
+
+static void *zlib_alloc(void *opaque, unsigned int nitems, unsigned int isize)
+{
+	UNUSED(opaque);
+	size_t size = nitems * isize + sizeof(struct zlib_chunk);
+	struct zlib_chunk *chunk = mmap(NULL, size, PROT_READ|PROT_WRITE,
+		    MAP_PRIVATE|MAP_ANONYMOUS, 0, 0);
+	if (chunk == NULL)
+		return NULL;
+	chunk->size = size;
+	return chunk + 1;
+}
+
+static void zlib_free(void *opaque, void *ptr)
+{
+	UNUSED(opaque);
+	struct zlib_chunk *chunk = (struct zlib_chunk *) ptr - 1;
+	munmap(chunk, chunk->size);
+}
+
 struct remotethread *call_remotethread(remotethread_func_t func,
 				       const void *param, size_t param_len)
 {
@@ -308,30 +333,25 @@ struct remotethread *call_remotethread(remotethread_func_t func,
 	sin.sin_addr = servers[rand() % num_servers];
 	sin.sin_port = htons(DEFAULT_PORT);
 	if (connect(fd, (struct sockaddr *) &sin, sizeof sin)) {
-		close(fd);
 		warning("connect() failed (%s)\n", strerror(errno));
-		return NULL;
+		goto err;
 	}
 
 	size_t binary_len;
 	void *binary = read_file(my_binary, &binary_len);
-	if (binary == NULL) {
-		close(fd);
-		return NULL;
-	}
+	if (binary == NULL)
+		goto err;
 
 	struct hello hello;
 	hello.magic = htonl(MAGIC);
 	hello.binary_len = htonl(binary_len);
 	if (write_all(fd, &hello, sizeof hello)) {
 		free(binary);
-		close(fd);
-		return NULL;
+		goto err;
 	}
 	if (write_all(fd, binary, binary_len)) {
 		free(binary);
-		close(fd);
-		return NULL;
+		goto err;
 	}
 	free(binary);
 
@@ -339,35 +359,77 @@ struct remotethread *call_remotethread(remotethread_func_t func,
 	void *param_buf = remotethread_malloc(param_len, NULL);
 	if (param_buf == NULL) {
 		warning("Out of memory\n");
-		close(fd);
-		return NULL;
+		goto err;
 	}
 	memcpy(param_buf, param, param_len);
 
+	/* zero the memory used by free chunks */
+	struct chunk *chunk = first_chunk;
+	while (chunk != (struct chunk *) current_end) {
+		if (chunk->status == CHUNK_FREE)
+			memset(chunk + 1, 0, chunk->size - sizeof(struct chunk));
+		chunk = (struct chunk *) ((char *) chunk + chunk->size);
+	}
+
 	size_t alloc_len = current_end - (char *) ALLOC_BEGIN;
+
+	/* compress the allocation area */
+	z_stream strm;
+	strm.zalloc = zlib_alloc;
+	strm.zfree = zlib_free;
+	if (deflateInit(&strm, Z_DEFAULT_COMPRESSION) != Z_OK) {
+		warning("Unable to initialize deflate\n");
+		remotethread_free(param_buf, NULL);
+		goto err;
+	}
+
+	void *compr_alloc = zlib_alloc(NULL, 1, alloc_len * 2);
+	if (compr_alloc == NULL) {
+		warning("Out of memory\n");
+		remotethread_free(param_buf, NULL);
+		deflateEnd(&strm);
+		goto err;
+	}
+	strm.next_in = (void *) ALLOC_BEGIN;
+	strm.avail_in = alloc_len;
+	strm.next_out = compr_alloc;
+	strm.avail_out = alloc_len * 2;
+	if (deflate(&strm, Z_FINISH) != Z_STREAM_END) {
+		warning("deflate failed\n");
+		remotethread_free(param_buf, NULL);
+		deflateEnd(&strm);
+		goto err;
+	}
+	assert(strm.avail_in == 0);
+	size_t alloc_compr_len = alloc_len * 2 - strm.avail_out;
+	deflateEnd(&strm);
+
+	remotethread_free(param_buf, NULL);
 
 	struct call call;
 	call.alloc_len = htonl(alloc_len);
+	call.alloc_compr_len = htonl(alloc_compr_len);
 	call.param_len = htonl(param_len);
 	call.param = (uint64_t) param_buf;
 	call.eip = (uint64_t) func;
 
 	if (write_all(fd, &call, sizeof call)) {
-		close(fd);
-		remotethread_free(param_buf, NULL);
-		return NULL;
+		zlib_free(NULL, compr_alloc);
+		goto err;
 	}
-	if (write_all(fd, (void *) ALLOC_BEGIN, alloc_len)) {
-		close(fd);
-		remotethread_free(param_buf, NULL);
-		return NULL;
+	if (write_all(fd, compr_alloc, alloc_compr_len)) {
+		zlib_free(NULL, compr_alloc);
+		goto err;
 	}
-
-	remotethread_free(param_buf, NULL);
+	zlib_free(NULL, compr_alloc);
 
 	struct remotethread *rt = calloc(1, sizeof *rt);
 	rt->fd = fd;
 	return rt;
+
+ err:
+	close(fd);
+	return NULL;
 }
 
 void *poll_remotethread(struct remotethread *rt, size_t *reply_len)
@@ -455,12 +517,47 @@ static int slave(int fd)
 		return -1;
 
 	size_t alloc_len = ntohl(call.alloc_len);
+	size_t alloc_compr_len = ntohl(call.alloc_compr_len);
 	size_t param_len = ntohl(call.param_len);
 
-	if (grow_alloc(alloc_len) == NULL)
+	void *compr_alloc = zlib_alloc(NULL, alloc_compr_len, 1);
+	if (compr_alloc == NULL) {
+		warning("Out of memory\n");
 		return -1;
-	if (read_all(fd, (void *) ALLOC_BEGIN, alloc_len))
+	}
+
+	if (read_all(fd, compr_alloc, alloc_compr_len)) {
+		zlib_free(NULL, compr_alloc);
 		return -1;
+	}
+
+	if (grow_alloc(alloc_len) == NULL) {
+		zlib_free(NULL, compr_alloc);
+		return -1;
+	}
+
+	/* decompress allocation area */
+	z_stream strm;
+	strm.zalloc = zlib_alloc;
+	strm.zfree = zlib_free;
+	if (inflateInit(&strm) != Z_OK) {
+		warning("Unable to initialize inflate\n");
+		zlib_free(NULL, compr_alloc);
+		return -1;
+	}
+	strm.next_in = compr_alloc;
+	strm.avail_in = alloc_compr_len;
+	strm.next_out = (void *) ALLOC_BEGIN;
+	strm.avail_out = alloc_len;
+	int status = inflate(&strm, Z_NO_FLUSH);
+	inflateEnd(&strm);
+	zlib_free(NULL, compr_alloc);
+
+	if (status != Z_STREAM_END || strm.avail_in != 0
+	    || strm.avail_out != 0) {
+		warning("Unable to inflate alloc (%d)\n", status);
+		return -1;
+	}
 
 	/* update last_chunk */
 	struct chunk *chunk = first_chunk;

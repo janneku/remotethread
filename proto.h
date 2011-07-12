@@ -17,6 +17,7 @@ struct hello {
 
 struct call {
 	uint32_t alloc_len;
+	uint32_t alloc_compr_len;
 	uint32_t param_len;
 	uint64_t eip; /* memory address */
 	uint64_t param; /* memory address */
