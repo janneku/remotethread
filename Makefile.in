@@ -7,9 +7,8 @@ LIBPATH = {LIBPATH}
 
 LIB_OBJS = lib.o utils.o
 SERVER_OBJS = server.o utils.o
-TEST_OBJS = test.o
 
-all:	libremotethread.so remotethread-server test
+all:	libremotethread.so remotethread-server test alloc-test
 
 libremotethread.so:	$(LIB_OBJS)
 	$(CC) $(CFLAGS) -Wl,-soname,libremotethread.so -o $@ $(LIB_OBJS)
@@ -17,8 +16,11 @@ libremotethread.so:	$(LIB_OBJS)
 remotethread-server:	$(SERVER_OBJS)
 	$(CC) $(EXECFLAGS) -o $@ $(SERVER_OBJS)
 
-test:	$(TEST_OBJS)
-	$(CC) $(EXECFLAGS) -o $@ $(TEST_OBJS) -L. -lremotethread -Wl,-rpath,. -lremotethread
+test:	test.o
+	$(CC) $(EXECFLAGS) -o $@ test.o -L. -lremotethread -Wl,-rpath,. -lremotethread
+
+alloc-test:	alloc-test.o
+	$(CC) $(EXECFLAGS) -o $@ alloc-test.o -L. -lremotethread -Wl,-rpath,. -lremotethread
 
 install:	
 	mkdir -p -m 755 "$(PREFIX)/lib" "$(PREFIX)/bin"

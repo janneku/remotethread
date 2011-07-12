@@ -8,8 +8,10 @@ struct remotethread;
 typedef void *(*remotethread_func_t)(const void *param, size_t param_len,
 				     size_t *reply_len);
 
+void remotethread_check_alloc(void);
 void *remotethread_malloc(size_t size, const void *caller);
 void remotethread_free(void *ptr, const void *caller);
+void *remotethread_realloc(void *ptr, size_t new_size, const void *caller);
 
 #define RT_EAGAIN	((void *) -1)
 

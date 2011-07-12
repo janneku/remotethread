@@ -63,13 +63,54 @@ struct chunk {
 #define ALLOC_BEGIN	0x40000000
 #define PAGE_SIZE	4096
 
-static struct chunk *first_chunk = (struct chunk *) ALLOC_BEGIN;
+static struct chunk *const first_chunk = (struct chunk *) ALLOC_BEGIN;
 static struct chunk *last_chunk = NULL;
+static struct chunk *alloc_chunk = (struct chunk *) ALLOC_BEGIN;
 static char *current_end = (char *) ALLOC_BEGIN;
 
 static size_t round_up(size_t val, size_t align)
 {
 	return (val + align - 1) & ~(align - 1);
+}
+
+static struct chunk *merge_free_chunks(struct chunk *chunk)
+{
+	/* merge with previous */
+	if (chunk->prev && chunk->prev->status == CHUNK_FREE) {
+		struct chunk *next = chunk;
+		chunk = chunk->prev;
+		chunk->size += next->size;
+
+		next->status = 0xdeadbeef;
+
+		/* fix back pointer */
+		if (next == last_chunk)
+			last_chunk = chunk;
+		else {
+			struct chunk *next =
+				(struct chunk *) ((char *) chunk + chunk->size);
+			next->prev = chunk;
+		}
+	}
+
+	/* merge with next */
+	struct chunk *next = (struct chunk *) ((char *) chunk + chunk->size);
+	if (next != (struct chunk *) current_end && next->status == CHUNK_FREE) {
+		chunk->size += next->size;
+
+		next->status = 0xdeadbeef;
+
+		/* fix back pointer */
+		if (next == last_chunk)
+			last_chunk = chunk;
+		else {
+			struct chunk *next =
+				(struct chunk *) ((char *) chunk + chunk->size);
+			next->prev = chunk;
+		}
+	}
+	alloc_chunk = chunk;
+	return chunk;
 }
 
 static struct chunk *grow_alloc(size_t size)
@@ -88,16 +129,17 @@ static struct chunk *grow_alloc(size_t size)
 	chunk->status = CHUNK_FREE;
 	chunk->prev = last_chunk;
 	last_chunk = chunk;
-	return chunk;
+	return merge_free_chunks(chunk);
 }
 
-static void dump_alloc(void)
+void remotethread_check_alloc(void)
 {
 	printf("----\n");
 	const struct chunk *chunk = first_chunk;
 	const struct chunk *prev = NULL;
 	while (chunk != (struct chunk *) current_end) {
-		printf("%p %zu %d\n", chunk, chunk->size, chunk->status);
+		printf("%p %zu %s\n", chunk, chunk->size,
+			chunk->status == CHUNK_FREE ? "free" : "allocated");
 		assert(chunk->prev == prev);
 		prev = chunk;
 		chunk = (struct chunk *) ((char *) chunk + chunk->size);
@@ -105,36 +147,59 @@ static void dump_alloc(void)
 	assert(prev == last_chunk);
 }
 
+static struct chunk *find_free_chunk(size_t size)
+{
+	struct chunk *chunk = alloc_chunk;
+	if (chunk != (struct chunk *) current_end) {
+		while (chunk->status != CHUNK_FREE || chunk->size < size) {
+			/* go to next chunk */
+			chunk = (struct chunk *) ((char *) chunk + chunk->size);
+			if (chunk == (struct chunk *) current_end)
+				chunk = first_chunk;
+
+			if (chunk == alloc_chunk) {
+				/* scanned all the way around */
+				break;
+			}
+		}
+		alloc_chunk = chunk;
+	}
+	return grow_alloc(size);
+}
+
+static struct chunk *split_chunk(struct chunk *chunk, size_t pos)
+{
+	struct chunk *new_chunk = (struct chunk *) ((char *) chunk + pos);
+	new_chunk->size = chunk->size - pos;
+	new_chunk->status = CHUNK_FREE;
+	new_chunk->prev = chunk;
+
+	/* fix back pointer */
+	if (chunk == last_chunk)
+		last_chunk = new_chunk;
+	else {
+		struct chunk *next =
+			(struct chunk *) ((char *) chunk + chunk->size);
+		next->prev = new_chunk;
+	}
+	chunk->size = pos;
+	alloc_chunk = new_chunk;
+	return new_chunk;
+}
+
 void *remotethread_malloc(size_t size, const void *caller)
 {
 	UNUSED(caller);
 	size = round_up(size + sizeof(struct chunk), 64);
 
-	struct chunk *chunk = first_chunk;
-	while (chunk != (struct chunk *) current_end) {
-		if (chunk->status == CHUNK_FREE && chunk->size >= size)
-			break;
-		chunk = (struct chunk *) ((char *) chunk + chunk->size);
-	}
-
-	if (chunk == (struct chunk *) current_end) {
-		chunk = grow_alloc(size);
-		if (chunk == NULL)
-			return NULL;
-	}
+	struct chunk *chunk = find_free_chunk(size);
+	if (chunk == NULL)
+		return NULL;
 	chunk->status = CHUNK_ALLOC;
 
 	if (chunk->size >= size + 64) {
 		/* split into two */
-		struct chunk *split =
-			(struct chunk *) ((char *) chunk + size);
-		split->size = chunk->size - size;
-		split->status = CHUNK_FREE;
-		split->prev = chunk;
-
-		if (chunk == last_chunk)
-			last_chunk = split;
-		chunk->size = size;
+		split_chunk(chunk, size);
 	}
 	return chunk + 1;
 }
@@ -142,35 +207,78 @@ void *remotethread_malloc(size_t size, const void *caller)
 void remotethread_free(void *ptr, const void *caller)
 {
 	UNUSED(caller);
+	if (ptr == NULL)
+		return;
+
 	struct chunk *chunk = (struct chunk *) ptr - 1;
 	assert(chunk->status == CHUNK_ALLOC);
 	chunk->status = CHUNK_FREE;
+	merge_free_chunks(chunk);
+}
 
-	struct chunk *next = (struct chunk *) ((char *) chunk + chunk->size);
+void *remotethread_realloc(void *ptr, size_t new_size, const void *caller)
+{
+	UNUSED(caller);
+	if (ptr == NULL)
+		return remotethread_malloc(new_size, caller);
 
-	/* merge with previous */
-	if (chunk->prev && chunk->prev->status == CHUNK_FREE) {
-		struct chunk *prev = chunk->prev;
-		prev->size += chunk->size;
-		if (chunk == last_chunk)
-			last_chunk = prev;
-		if (next != (struct chunk *) current_end)
-			next->prev = prev;
-		chunk->status = 0xdeadbeef;
-		chunk = prev;
-	}
+	new_size = round_up(new_size + sizeof(struct chunk), 64);
+	struct chunk *chunk = (struct chunk *) ptr - 1;
+	assert(chunk->status == CHUNK_ALLOC);
 
-	/* merge with next */
-	if (next != (struct chunk *) current_end && next->status == CHUNK_FREE) {
-		chunk->size += next->size;
-		if (next == last_chunk)
-			last_chunk = chunk;
-		else {
-			struct chunk *next_next =
-				(struct chunk *) ((char *) next + next->size);
-			next_next->prev = chunk;
+	if (new_size < chunk->size) {
+		/* shrink */
+		if (chunk->size >= new_size + 64) {
+			/* split into two */
+			struct chunk *new_chunk = split_chunk(chunk, new_size);
+			merge_free_chunks(new_chunk);
+		}
+	} else {
+		/* merge with next */
+		struct chunk *next =
+			(struct chunk *) ((char *) chunk + chunk->size);
+		if (next != (struct chunk *) current_end
+		    && next->status == CHUNK_FREE
+		    && chunk->size + next->size >= new_size) {
+			chunk->size += next->size;
+
+			next->status = 0xdeadbeef;
+
+			/* fix alloc pointer */
+			if (next == alloc_chunk)
+				alloc_chunk = first_chunk;
+
+			/* fix back pointer */
+			if (next == last_chunk)
+				last_chunk = chunk;
+			else {
+				struct chunk *next =
+				(struct chunk *) ((char *) chunk + chunk->size);
+				next->prev = chunk;
+			}
+			if (chunk->size >= new_size + 64) {
+				/* split into two */
+				split_chunk(chunk, new_size);
+			}
+		} else {
+			/* does not fit, we have to copy */
+			struct chunk *new_chunk = find_free_chunk(new_size);
+			if (new_chunk == NULL)
+				return NULL;
+			new_chunk->status = CHUNK_ALLOC;
+
+			if (new_chunk->size >= new_size + 64) {
+				/* split into two */
+				split_chunk(new_chunk, new_size);
+			}
+			memcpy(new_chunk + 1, chunk + 1,
+				chunk->size - sizeof(struct chunk));
+			chunk->status = CHUNK_FREE;
+			merge_free_chunks(chunk);
+			chunk = new_chunk;
 		}
 	}
+	return chunk + 1;
 }
 
 struct remotethread *call_remotethread(remotethread_func_t func,
