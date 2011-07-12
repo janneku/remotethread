@@ -13,20 +13,27 @@
 #define CHUNKS			8
 #define CHUNK_LEN		(BUFFER_LEN / CHUNKS)
 
+struct xor_param {
+	unsigned char *buf;
+	size_t len;
+};
+
 void *xor_func(const void *param, size_t param_len, size_t *reply_len)
 {
-	const unsigned char *par = param;
-
-	if (param_len % 2)
+	if (param_len != sizeof(struct xor_param))
 		return NULL;
-	*reply_len = param_len / 2;
+	const struct xor_param *par = param;
+
+	if (par->len % 2)
+		return NULL;
+	*reply_len = par->len / 2;
 	unsigned char *reply = malloc(*reply_len);
 	if (reply == NULL)
 		return NULL;
 
 	size_t i;
-	for (i = 0; i < param_len / 2; ++i) {
-		reply[i] = par[i] ^ par[i + param_len / 2];
+	for (i = 0; i < par->len / 2; ++i) {
+		reply[i] = par->buf[i] ^ par->buf[i + par->len / 2];
 	}
 	return reply;
 }
@@ -36,7 +43,7 @@ int main(int argc, char **argv)
 	if (init_remotethread(&argc, &argv))
 		return 1;
 
-	unsigned char *buf = malloc(BUFFER_LEN);
+	unsigned char *buf = remotethread_malloc(BUFFER_LEN, NULL);
 
 	size_t i;
 	for (i = 0; i < BUFFER_LEN; ++i)
@@ -46,8 +53,10 @@ int main(int argc, char **argv)
 
 	/* submit threads */
 	for (i = 0; i < CHUNKS; ++i) {
-		threads[i] = call_remotethread(xor_func, buf + i * CHUNK_LEN,
-					       CHUNK_LEN);
+		struct xor_param par;
+		par.buf = buf + i * CHUNK_LEN;
+		par.len = CHUNK_LEN;
+		threads[i] = call_remotethread(xor_func, &par, sizeof par);
 		if (threads[i] == NULL)
 			break;
 	}
@@ -64,7 +73,7 @@ int main(int argc, char **argv)
 
 		destroy_remotethread(threads[i]);
 	}
-	free(buf);
+	remotethread_free(buf, NULL);
 
 	return 0;
 }

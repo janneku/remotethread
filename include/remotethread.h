@@ -8,6 +8,9 @@ struct remotethread;
 typedef void *(*remotethread_func_t)(const void *param, size_t param_len,
 				     size_t *reply_len);
 
+void *remotethread_malloc(size_t size, const void *caller);
+void remotethread_free(void *ptr, const void *caller);
+
 struct remotethread *call_remotethread(remotethread_func_t func,
 				       const void *param, size_t param_len);
 void *wait_remotethread(struct remotethread *rt, size_t *reply_len);

@@ -10,6 +10,9 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <malloc.h>
+#include <sys/mman.h>
+#include <assert.h>
 
 #define MAX_SERVERS	16
 
@@ -40,6 +43,128 @@ static void *read_file(const char *fname, size_t *len)
 	fread(buf, 1, *len, f);
 	fclose(f);
 	return buf;
+}
+
+enum {
+	CHUNK_ALLOC = 1,
+	CHUNK_FREE,
+};
+
+struct chunk {
+	struct chunk *prev;
+	size_t size;
+	int status;
+};
+
+#define ALLOC_BEGIN	0x40000000
+#define PAGE_SIZE	4096
+
+static struct chunk *first_chunk = (struct chunk *) ALLOC_BEGIN;
+static struct chunk *last_chunk = NULL;
+static char *current_end = (char *) ALLOC_BEGIN;
+
+static size_t round_up(size_t val, size_t align)
+{
+	return (val + align - 1) & ~(align - 1);
+}
+
+static struct chunk *grow_alloc(size_t size)
+{
+	size = round_up(size, PAGE_SIZE * 16);
+	if (mmap(current_end, size, PROT_READ|PROT_WRITE,
+		 MAP_PRIVATE|MAP_ANONYMOUS, 0, 0) == MAP_FAILED) {
+		warning("unable to grow allocation\n");
+		return NULL;
+	}
+
+	struct chunk *chunk = (void *) current_end;
+	current_end += size;
+
+	chunk->size = size;
+	chunk->status = CHUNK_FREE;
+	chunk->prev = last_chunk;
+	last_chunk = chunk;
+	return chunk;
+}
+
+static void dump_alloc(void)
+{
+	printf("----\n");
+	const struct chunk *chunk = first_chunk;
+	struct chunk *prev = NULL;
+	while (chunk != (struct chunk *) current_end) {
+		printf("%p %zu %d\n", chunk, chunk->size, chunk->status);
+		assert(chunk->prev == prev);
+		prev = chunk;
+		chunk = (struct chunk *) ((char *) chunk + chunk->size);
+	}
+	assert(prev == last_chunk);
+}
+
+void *remotethread_malloc(size_t size, const void *caller)
+{
+	size = round_up(size + sizeof(struct chunk), 64);
+
+	struct chunk *chunk = first_chunk;
+	while (chunk != (struct chunk *) current_end) {
+		if (chunk->status == CHUNK_FREE && chunk->size >= size)
+			break;
+		chunk = (struct chunk *) ((char *) chunk + chunk->size);
+	}
+
+	if (chunk == (struct chunk *) current_end) {
+		chunk = grow_alloc(size);
+		if (chunk == NULL)
+			return NULL;
+	}
+	chunk->status = CHUNK_ALLOC;
+
+	if (chunk->size >= size + 64) {
+		/* split into two */
+		struct chunk *split =
+			(struct chunk *) ((char *) chunk + size);
+		split->size = chunk->size - size;
+		split->status = CHUNK_FREE;
+		split->prev = chunk;
+
+		if (chunk == last_chunk)
+			last_chunk = split;
+		chunk->size = size;
+	}
+	return chunk + 1;
+}
+
+void remotethread_free(void *ptr, const void *caller)
+{
+	struct chunk *chunk = (struct chunk *) ptr - 1;
+	assert(chunk->status == CHUNK_ALLOC);
+	chunk->status = CHUNK_FREE;
+
+	struct chunk *next = (struct chunk *) ((char *) chunk + chunk->size);
+
+	/* merge with previous */
+	if (chunk->prev && chunk->prev->status == CHUNK_FREE) {
+		struct chunk *prev = chunk->prev;
+		prev->size += chunk->size;
+		if (chunk == last_chunk)
+			last_chunk = prev;
+		if (next != (struct chunk *) current_end)
+			next->prev = prev;
+		chunk->status = 0xdeadbeef;
+		chunk = prev;
+	}
+
+	/* merge with next */
+	if (next != (struct chunk *) current_end && next->status == CHUNK_FREE) {
+		chunk->size += next->size;
+		if (next == last_chunk)
+			last_chunk = chunk;
+		else {
+			struct chunk *next_next =
+				(struct chunk *) ((char *) next + next->size);
+			next_next->prev = chunk;
+		}
+	}
 }
 
 struct remotethread *call_remotethread(remotethread_func_t func,
@@ -89,11 +214,18 @@ struct remotethread *call_remotethread(remotethread_func_t func,
 	}
 	free(binary);
 
+	size_t alloc_len = current_end - (char *) ALLOC_BEGIN;
+
 	struct call call;
+	call.alloc_len = htonl(alloc_len);
 	call.param_len = htonl(param_len);
 	call.eip = (uint64_t) func;
 
 	if (write_all(fd, &call, sizeof call)) {
+		close(fd);
+		return NULL;
+	}
+	if (write_all(fd, (void *) ALLOC_BEGIN, alloc_len)) {
 		close(fd);
 		return NULL;
 	}
@@ -144,7 +276,21 @@ static int slave(int fd)
 	if (read_all(fd, &call, sizeof call))
 		return -1;
 
+	size_t alloc_len = ntohl(call.alloc_len);
 	size_t param_len = ntohl(call.param_len);
+
+	if (grow_alloc(alloc_len) == NULL)
+		return -1;
+	if (read_all(fd, (void *) ALLOC_BEGIN, alloc_len))
+		return -1;
+
+	/* update last_chunk */
+	struct chunk *chunk = first_chunk;
+	while (chunk != (struct chunk *) current_end) {
+		last_chunk = chunk;
+		chunk = (struct chunk *) ((char *) chunk + chunk->size);
+	}
+
 	void *param = malloc(param_len);
 	if (param == NULL) {
 		warning("Out of memory\n");

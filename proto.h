@@ -16,6 +16,7 @@ struct hello {
 } PACKED;
 
 struct call {
+	uint32_t alloc_len;
 	uint32_t param_len;
 	uint64_t eip;
 } PACKED;

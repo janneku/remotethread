@@ -1,5 +1,6 @@
 #include "utils.h"
 #include <stdio.h>
+#include <unistd.h>
 #include <errno.h>
 
 int read_all(int fd, void *buf, size_t len)
