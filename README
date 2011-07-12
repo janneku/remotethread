@@ -1,0 +1,31 @@
+remotethread - A lightweight way to do distributed processing
+
+Copyright 2011 Janne Kulmala <janne.t.kulmala@iki.fi>
+
+Program code is licensed with GNU LGPL 2.1. See COPYING.LGPL file.
+
+USAGE
+-----
+
+1) Modify your program to create threads with remotethread API. The thread
+   callback function should be of the following form:
+
+typedef void *(*remotethread_func_t)(const void *param, size_t param_len,
+				     size_t *reply_len);
+
+   Where "param" and "param_len" specifies the input data to the thread
+   and "reply_len" and the returned pointer are used to return data.
+
+   You can create new threads by calling call_remotethread() with
+   input data. To wait for specific thread to finish, use wait_remotethread().
+
+   Finally, add call to init_remotethread(&argc, &argv) to the beginning
+   of main().
+
+2) Start one or more server processes by running ./remotethread-server.
+   The servers should be of the same architecture and run the same operating
+   system as the machine where the main program is running.
+
+3) Run the program and give the IP addresses of the machines running the
+   server processes as command line arguments (--remotethread [ip]).
+   Work is automatically distributed to the servers.
