@@ -18,6 +18,10 @@
 
 struct remotethread {
 	int fd;
+	struct reply reply;
+	size_t pos;
+	char *buf;
+	size_t reply_len;
 };
 
 static struct in_addr servers[MAX_SERVERS];
@@ -91,7 +95,7 @@ static void dump_alloc(void)
 {
 	printf("----\n");
 	const struct chunk *chunk = first_chunk;
-	struct chunk *prev = NULL;
+	const struct chunk *prev = NULL;
 	while (chunk != (struct chunk *) current_end) {
 		printf("%p %zu %d\n", chunk, chunk->size, chunk->status);
 		assert(chunk->prev == prev);
@@ -103,6 +107,7 @@ static void dump_alloc(void)
 
 void *remotethread_malloc(size_t size, const void *caller)
 {
+	UNUSED(caller);
 	size = round_up(size + sizeof(struct chunk), 64);
 
 	struct chunk *chunk = first_chunk;
@@ -136,6 +141,7 @@ void *remotethread_malloc(size_t size, const void *caller)
 
 void remotethread_free(void *ptr, const void *caller)
 {
+	UNUSED(caller);
 	struct chunk *chunk = (struct chunk *) ptr - 1;
 	assert(chunk->status == CHUNK_ALLOC);
 	chunk->status = CHUNK_FREE;
@@ -171,7 +177,11 @@ struct remotethread *call_remotethread(remotethread_func_t func,
 				       const void *param, size_t param_len)
 {
 	if (num_servers == 0) {
-		warning("no servers defined! use --remotethread [ip]\n");
+		static int warned = 0;
+		if (warned == 0) {
+			warning("no servers defined! use --remotethread [ip]\n");
+			warned = 1;
+		}
 		return NULL;
 	}
 
@@ -234,34 +244,81 @@ struct remotethread *call_remotethread(remotethread_func_t func,
 		return NULL;
 	}
 
-	struct remotethread *rt = malloc(sizeof *rt);
+	struct remotethread *rt = calloc(1, sizeof *rt);
 	rt->fd = fd;
 	return rt;
 }
 
+void *poll_remotethread(struct remotethread *rt, size_t *reply_len)
+{
+	if (rt->reply_len == 0) {
+		if (bytes_available(rt->fd) < sizeof(struct reply))
+			return RT_EAGAIN;
+		if (read_all(rt->fd, &rt->reply, sizeof(struct reply)))
+			return NULL;
+
+		if (rt->reply.status == STATUS_ERROR) {
+			warning("server returned an error\n");
+			return NULL;
+		}
+
+		rt->reply_len = ntohl(rt->reply.reply_len);
+		rt->pos = 0;
+		rt->buf = malloc(rt->reply_len);
+		if (rt->buf == NULL) {
+			warning("Out of memory\n");
+			return NULL;
+		}
+	}
+
+	size_t avail = bytes_available(rt->fd);
+	if (avail == 0)
+		return RT_EAGAIN;
+	if (avail > rt->reply_len - rt->pos) {
+		warning("extra bytes in reply?\n");
+		avail = rt->reply_len - rt->pos;
+	}
+
+	size_t got = read_available(rt->fd, rt->buf + rt->pos, avail);
+	if (got == 0) {
+		free(rt->buf);
+		return NULL;
+	}
+	rt->pos += got;
+	if (rt->pos < rt->reply_len)
+		return RT_EAGAIN;
+
+	*reply_len = rt->reply_len;
+	return rt->buf;
+}
+
 void *wait_remotethread(struct remotethread *rt, size_t *reply_len)
 {
-	struct reply reply;
-	if (read_all(rt->fd, &reply, sizeof reply))
-		return NULL;
+	if (rt->reply_len == 0) {
+		if (read_all(rt->fd, &rt->reply, sizeof(struct reply)))
+			return NULL;
 
-	if (reply.status == STATUS_ERROR) {
-		warning("server returned an error\n");
-		return NULL;
+		if (rt->reply.status == STATUS_ERROR) {
+			warning("server returned an error\n");
+			return NULL;
+		}
+
+		rt->reply_len = ntohl(rt->reply.reply_len);
+		rt->pos = 0;
+		rt->buf = malloc(rt->reply_len);
+		if (rt->buf == NULL) {
+			warning("Out of memory\n");
+			return NULL;
+		}
 	}
 
-	*reply_len = ntohl(reply.reply_len);
-
-	void *reply_buf = malloc(*reply_len);
-	if (reply_buf == NULL) {
-		warning("Out of memory\n");
+	if (read_all(rt->fd, rt->buf + rt->pos, rt->reply_len - rt->pos)) {
+		free(rt->buf);
 		return NULL;
 	}
-	if (read_all(rt->fd, reply_buf, *reply_len)) {
-		free(reply_buf);
-		return NULL;
-	}
-	return reply_buf;
+	rt->pos = rt->reply_len;
+	*reply_len = rt->reply_len;
+	return rt->buf;
 } 
 
 void destroy_remotethread(struct remotethread *rt)

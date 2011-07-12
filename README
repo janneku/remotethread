@@ -14,10 +14,18 @@ typedef void *(*remotethread_func_t)(const void *param, size_t param_len,
 				     size_t *reply_len);
 
    Where "param" and "param_len" specifies the input data to the thread
-   and "reply_len" and the returned pointer are used to return data.
+   and "reply_len" and the returned pointer are used to return data to the
+   caller.
+
+   To share data structures with a remote thread, use remotethread_malloc()
+   and remotethread_free(). All allocated data is copied to over the network
+   when a thread is created. All pointers within the data allocated with
+   these functions are also valid at the remote site.
 
    You can create new threads by calling call_remotethread() with
    input data. To wait for specific thread to finish, use wait_remotethread().
+   To check the status of a thread without blocking, use poll_remotethread().
+   The function will return RT_EAGAIN if the thread is still running.
 
    Finally, add call to init_remotethread(&argc, &argv) to the beginning
    of main().

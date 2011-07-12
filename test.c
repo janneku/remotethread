@@ -8,6 +8,7 @@
 #include <remotethread.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 #define BUFFER_LEN		(1024*1024)
 #define CHUNKS			8
@@ -67,7 +68,17 @@ int main(int argc, char **argv)
 			break;
 
 		size_t reply_len;
-		void *reply = wait_remotethread(threads[i], &reply_len);
+		void *reply;
+		while (1) {
+			reply = poll_remotethread(threads[i], &reply_len);
+			if (reply == RT_EAGAIN) {
+				sleep(1);
+				continue;
+			} else if (reply == NULL) {
+				printf("poll failed\n");
+			}
+			break;
+		}
 		/* do something with the reply */
 		free(reply);
 
