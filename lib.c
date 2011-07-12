@@ -224,25 +224,35 @@ struct remotethread *call_remotethread(remotethread_func_t func,
 	}
 	free(binary);
 
+	/* create copy of the parameters */
+	void *param_buf = remotethread_malloc(param_len, NULL);
+	if (param_buf == NULL) {
+		warning("Out of memory\n");
+		close(fd);
+		return NULL;
+	}
+	memcpy(param_buf, param, param_len);
+
 	size_t alloc_len = current_end - (char *) ALLOC_BEGIN;
 
 	struct call call;
 	call.alloc_len = htonl(alloc_len);
 	call.param_len = htonl(param_len);
+	call.param = (uint64_t) param_buf;
 	call.eip = (uint64_t) func;
 
 	if (write_all(fd, &call, sizeof call)) {
 		close(fd);
+		remotethread_free(param_buf, NULL);
 		return NULL;
 	}
 	if (write_all(fd, (void *) ALLOC_BEGIN, alloc_len)) {
 		close(fd);
+		remotethread_free(param_buf, NULL);
 		return NULL;
 	}
-	if (write_all(fd, param, param_len)) {
-		close(fd);
-		return NULL;
-	}
+
+	remotethread_free(param_buf, NULL);
 
 	struct remotethread *rt = calloc(1, sizeof *rt);
 	rt->fd = fd;
@@ -348,20 +358,11 @@ static int slave(int fd)
 		chunk = (struct chunk *) ((char *) chunk + chunk->size);
 	}
 
-	void *param = malloc(param_len);
-	if (param == NULL) {
-		warning("Out of memory\n");
-		return -1;
-	}
-	if (read_all(fd, param, param_len)) {
-		free(param);
-		return -1;
-	}
+	remotethread_func_t func = (remotethread_func_t) call.eip;
+	const void *param = (void *) call.param;
 
 	size_t reply_len;
-	remotethread_func_t func = (remotethread_func_t) call.eip;
 	void *reply_buf = func(param, param_len, &reply_len);
-	free(param);
 
 	if (reply_buf == NULL)
 		return -1;

@@ -18,7 +18,8 @@ struct hello {
 struct call {
 	uint32_t alloc_len;
 	uint32_t param_len;
-	uint64_t eip;
+	uint64_t eip; /* memory address */
+	uint64_t param; /* memory address */
 } PACKED;
 
 #define STATUS_OK	1
