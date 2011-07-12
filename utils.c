@@ -25,10 +25,10 @@ size_t read_available(int fd, void *buf, size_t len)
 			if (errno == EAGAIN)
 				break;
 			warning("read() failed (%s)\n", strerror(errno));
-			return -1;
+			return 0;
 		} else if (got == 0) {
 			warning("unexpected EOF\n");
-			return -1;
+			return 0;
 		}
 		pos += got;
 	}
