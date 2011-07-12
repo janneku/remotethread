@@ -151,7 +151,11 @@ static struct chunk *find_free_chunk(size_t size)
 {
 	struct chunk *chunk = alloc_chunk;
 	if (chunk != (struct chunk *) current_end) {
-		while (chunk->status != CHUNK_FREE || chunk->size < size) {
+		while (1) {
+			if (chunk->status == CHUNK_FREE && chunk->size >= size) {
+				alloc_chunk = chunk;
+				return chunk;
+			}
 			/* go to next chunk */
 			chunk = (struct chunk *) ((char *) chunk + chunk->size);
 			if (chunk == (struct chunk *) current_end)
@@ -162,7 +166,6 @@ static struct chunk *find_free_chunk(size_t size)
 				break;
 			}
 		}
-		alloc_chunk = chunk;
 	}
 	return grow_alloc(size);
 }
