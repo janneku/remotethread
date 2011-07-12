@@ -1,9 +1,9 @@
 CC = gcc
 CFLAGS = -W -Wall -O2 -g -fPIC -shared -Iinclude 
 EXECFLAGS = -W -Wall -O2 -g -Iinclude 
-LDFLAGS = 
-PREFIX = /usr
-LIBPATH = /usr/lib64
+LDFLAGS = {LDFLAGS}
+PREFIX = {PREFIX}
+LIBPATH = {LIBPATH}
 
 LIB_OBJS = lib.o utils.o
 SERVER_OBJS = server.o utils.o
