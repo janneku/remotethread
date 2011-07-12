@@ -9,6 +9,9 @@
 #include <sys/stat.h>
 #include <netinet/in.h>
 #include <unistd.h>
+#include <signal.h>
+
+static int quit = 0;
 
 int write_file(const char *fname, const void *buf, size_t len)
 {
@@ -66,6 +69,12 @@ void process(int fd)
 	}
 }
 
+static void sigint_handler(int sig)
+{
+	UNUSED(sig);
+	quit = 1;
+}
+
 int main()
 {
 	int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -87,11 +96,21 @@ int main()
 		warning("listen() failed (%s)\n", strerror(errno));
 		return 1;
 	}
-	while (1) {
+
+	struct sigaction sa;
+	sa.sa_handler = sigint_handler;
+	sigemptyset(&sa.sa_mask);
+	sa.sa_flags = 0;
+	sigaction(SIGINT, &sa, NULL);
+	sigaction(SIGTERM, &sa, NULL);
+
+	while (quit == 0) {
 		struct sockaddr_in sin;
 		socklen_t slen = sizeof sin;
 		int fd = accept(listen_fd, (struct sockaddr *) &sin, &slen);
 		if (fd < 0) {
+			if (errno == EINTR || errno == EAGAIN)
+				continue;
 			warning("accept() failed (%s)\n", strerror(errno));
 			continue;
 		}
@@ -113,5 +132,7 @@ int main()
 		}
 		close(fd);
 	}
+	close(listen_fd);
+	printf("terminated\n");
 	return 0;
 }
