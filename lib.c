@@ -187,7 +187,7 @@ struct remotethread *call_remotethread(remotethread_func_t func,
 
 	int fd = socket(AF_INET, SOCK_STREAM, 0);
 	if (fd < 0) {
-		perror("socket");
+		warning("socket() failed (%s)\n", strerror(errno));
 		return NULL;
 	}
 
@@ -198,7 +198,7 @@ struct remotethread *call_remotethread(remotethread_func_t func,
 	sin.sin_port = htons(DEFAULT_PORT);
 	if (connect(fd, (struct sockaddr *) &sin, sizeof sin)) {
 		close(fd);
-		perror("connect");
+		warning("connect() failed (%s)\n", strerror(errno));
 		return NULL;
 	}
 

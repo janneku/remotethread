@@ -53,7 +53,7 @@ void process(int fd)
 	free(binary);
 
 	if (chmod(fname, 0700)) {
-		perror("chmod");
+		warning("chmod() failed (%s)\n", strerror(errno));
 		unlink(fname);
 		return;
 	}
@@ -61,7 +61,7 @@ void process(int fd)
 	char buf[64];
 	sprintf(buf, "%d", fd);
 	if (execl(fname, fname, SLAVE_ARG, buf, NULL)) {
-		perror("exec");
+		warning("exec() failed (%s)\n", strerror(errno));
 		unlink(fname);
 	}
 }
@@ -70,7 +70,7 @@ int main()
 {
 	int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
 	if (listen_fd < 0) {
-		perror("socket");
+		warning("socket() failed (%s)\n", strerror(errno));
 		return 1;
 	}
 
@@ -79,12 +79,12 @@ int main()
 	sin.sin_addr.s_addr = INADDR_ANY;
 	sin.sin_port = htons(DEFAULT_PORT);
 	if (bind(listen_fd, (struct sockaddr *) &sin, sizeof sin)) {
-		perror("bind");
+		warning("bind() failed (%s)\n", strerror(errno));
 		return 1;
 	}
 
 	if (listen(listen_fd, 10)) {
-		perror("listen");
+		warning("listen() failed (%s)\n", strerror(errno));
 		return 1;
 	}
 	while (1) {
@@ -92,7 +92,7 @@ int main()
 		socklen_t slen = sizeof sin;
 		int fd = accept(listen_fd, (struct sockaddr *) &sin, &slen);
 		if (fd < 0) {
-			perror("accept");
+			warning("accept() failed (%s)\n", strerror(errno));
 			continue;
 		}
 		pid_t pid = fork();

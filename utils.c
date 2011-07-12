@@ -8,7 +8,7 @@ size_t bytes_available(int fd)
 {
 	int avail;
 	if (ioctl(fd, FIONREAD, &avail)) {
-		perror("ioctl");
+		warning("ioctl() failed (%s)\n", strerror(errno));
 		return 0;
 	}
 	return avail;
@@ -24,7 +24,7 @@ size_t read_available(int fd, void *buf, size_t len)
 				continue;
 			if (errno == EAGAIN)
 				break;
-			perror("read");
+			warning("read() failed (%s)\n", strerror(errno));
 			return -1;
 		} else if (got == 0) {
 			warning("unexpected EOF\n");
@@ -43,7 +43,7 @@ int read_all(int fd, void *buf, size_t len)
 		if (got < 0) {
 			if (errno == EAGAIN || errno == EINTR)
 				continue;
-			perror("read");
+			warning("read() failed (%s)\n", strerror(errno));
 			return -1;
 		} else if (got == 0) {
 			warning("unexpected EOF\n");
@@ -62,7 +62,7 @@ int write_all(int fd, const void *buf, size_t len)
 		if (sent < 0) {
 			if (errno == EAGAIN || errno == EINTR)
 				continue;
-			perror("write");
+			warning("write() failed (%s)\n", strerror(errno));
 			return -1;
 		}
 		pos += sent;
