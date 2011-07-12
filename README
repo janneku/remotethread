@@ -22,6 +22,14 @@ typedef void *(*remotethread_func_t)(const void *param, size_t param_len,
    when a thread is created. All pointers within the data allocated with
    these functions are also valid at the remote site.
 
+   The allocator can be directly hooked to glibc's malloc as follows.
+
+       #include <malloc.h>
+       ...
+       __malloc_hook = remotethread_malloc;
+       __free_hook = remotethread_free;
+       __realloc_hook = remotethread_realloc;
+
    You can create new threads by calling call_remotethread() with
    input data. To wait for specific thread to finish, use wait_remotethread().
    To check the status of a thread without blocking, use poll_remotethread().
